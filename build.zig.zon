@@ -1,0 +1,11 @@
+.{
+    .name = "minhook-zig",
+    .version = "0.1.0",
+
+    .dependencies = .{
+        .minhook = .{
+            .url = "https://github.com/TsudaKageyu/minhook/archive/0f25a2449b3cf878bcbdbf91b693c38149ecf029.tar.gz",
+            .hash = "1220b41a465a89f125edcd042db2f345981f6faf285ade3b89a7a1636f1ff6782f99",
+        },
+    },
+}
