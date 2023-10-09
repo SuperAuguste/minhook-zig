@@ -209,5 +209,6 @@ test {
     var hook = Hook(*const fn (i32, i32) callconv(.C) i32).create(&funcs.add, &funcs.detouredAdd);
     funcs.trampoline = hook.trampoline;
     hook.enable();
-    std.log.err("{d}", .{funcs.add(5, 10)});
+
+    try std.testing.expectEqual(@as(i32, 30), funcs.add(7, 8));
 }
