@@ -53,9 +53,9 @@ pub const bindings = struct {
     ///                     used to call the original target function.
     ///                     This parameter can be NULL.
     pub extern fn MH_CreateHook(
-        target: *anyopaque,
-        detour: *anyopaque,
-        original: ?**anyopaque,
+        target: *const anyopaque,
+        detour: *const anyopaque,
+        original: ?**const anyopaque,
     ) callconv(std.os.windows.WINAPI) Status;
 
     /// Creates a hook for the specified API function, in disabled state.
@@ -72,8 +72,8 @@ pub const bindings = struct {
     pub extern fn MH_CreateHookApi(
         module_name: [*:0]const u16,
         proc_name: [*:0]const u8,
-        detour: *anyopaque,
-        original: ?**anyopaque,
+        detour: *const anyopaque,
+        original: ?**const anyopaque,
     ) callconv(std.os.windows.WINAPI) Status;
 
     /// Creates a hook for the specified API function, in disabled state.
@@ -93,42 +93,43 @@ pub const bindings = struct {
     pub extern fn MH_CreateHookApiEx(
         module_name: [*:0]const u16,
         proc_name: [*:0]const u8,
-        detour: *anyopaque,
-        original: ?**anyopaque,
+        detour: *const anyopaque,
+        original: ?**const anyopaque,
+        target: ?**const anyopaque,
     ) callconv(std.os.windows.WINAPI) Status;
 
     /// Removes an already created hook.
     /// Parameters:
     ///   pTarget [in] A pointer to the target function.
-    pub extern fn MH_RemoveHook(target: *anyopaque) callconv(std.os.windows.WINAPI) Status;
+    pub extern fn MH_RemoveHook(target: *const anyopaque) callconv(std.os.windows.WINAPI) Status;
 
     /// Enables an already created hook.
     /// Parameters:
     ///   pTarget [in] A pointer to the target function.
     ///                If this parameter is MH_ALL_HOOKS, all created hooks are
     ///                enabled in one go.
-    pub extern fn MH_EnableHook(target: *anyopaque) callconv(std.os.windows.WINAPI) Status;
+    pub extern fn MH_EnableHook(target: *const anyopaque) callconv(std.os.windows.WINAPI) Status;
 
     /// Disables an already created hook.
     /// Parameters:
     ///   pTarget [in] A pointer to the target function.
     ///                If this parameter is MH_ALL_HOOKS, all created hooks are
     ///                disabled in one go.
-    pub extern fn MH_DisableHook(target: *anyopaque) callconv(std.os.windows.WINAPI) Status;
+    pub extern fn MH_DisableHook(target: *const anyopaque) callconv(std.os.windows.WINAPI) Status;
 
     /// Queues to enable an already created hook.
     /// Parameters:
     ///   pTarget [in] A pointer to the target function.
     ///                If this parameter is MH_ALL_HOOKS, all created hooks are
     ///                queued to be enabled.
-    pub extern fn MH_QueueEnableHook(target: *anyopaque) callconv(std.os.windows.WINAPI) Status;
+    pub extern fn MH_QueueEnableHook(target: *const anyopaque) callconv(std.os.windows.WINAPI) Status;
 
     /// Queues to disable an already created hook.
     /// Parameters:
     ///   pTarget [in] A pointer to the target function.
     ///                If this parameter is MH_ALL_HOOKS, all created hooks are
     ///                queued to be disabled.
-    pub extern fn MH_QueueDisableHook(target: *anyopaque) callconv(std.os.windows.WINAPI) Status;
+    pub extern fn MH_QueueDisableHook(target: *const anyopaque) callconv(std.os.windows.WINAPI) Status;
 
     /// Applies all queued changes in one go.
     pub extern fn MH_ApplyQueued() callconv(std.os.windows.WINAPI) Status;
@@ -162,32 +163,131 @@ pub fn deinit() DeinitError!void {
     };
 }
 
-pub const HookState = enum { enabled, disabled };
-
 pub fn Hook(comptime FuncType: type) type {
     return struct {
         target: FuncType,
         trampoline: FuncType,
 
+        pub const CreateError = error{
+            Unknown,
+            NotInitialized,
+            AlreadyCreated,
+            NotExecutable,
+            UnsupportedFunction,
+            OutOfMemory,
+            MemoryProtect,
+        };
+
         /// Do not invoke the target function after hooking
         /// Returns the trampoline, which should be called instead
-        pub fn create(target: FuncType, detour: FuncType) @This() {
+        pub fn create(target: FuncType, detour: FuncType) CreateError!@This() {
             var trampoline: FuncType = undefined;
-            _ = bindings.MH_CreateHook(@ptrCast(@constCast(target)), @ptrCast(@constCast(detour)), @ptrCast(&trampoline));
+            switch (bindings.MH_CreateHook(@ptrCast(target), @ptrCast(@constCast(detour)), @ptrCast(&trampoline))) {
+                .ok => {},
+                .unknown => return error.Unknown,
+                .error_not_initialized => return error.NotInitialized,
+                .error_already_created => return error.AlreadyCreated,
+                .error_not_executable => return error.NotExecutable,
+                .error_unsupported_function => return error.UnsupportedFunction,
+                .error_memory_alloc => return error.OutOfMemory,
+                .error_memory_protect => return error.MemoryProtect,
+                else => unreachable,
+            }
+
             return .{
                 .target = target,
                 .trampoline = trampoline,
             };
         }
 
-        pub fn enable(hook: *@This()) void {
-            _ = bindings.MH_EnableHook(@ptrCast(@constCast(hook.target)));
+        pub const FindAndCreateError = CreateError || error{ ModuleNotFound, FunctionNotFound };
+
+        pub fn findAndCreateHook(module_name: [:0]const u16, function_name: [:0]const u8, detour: FuncType) FindAndCreateError!@This() {
+            var target: FuncType = undefined;
+            var trampoline: FuncType = undefined;
+
+            switch (bindings.MH_CreateHookApiEx(module_name, function_name, @ptrCast(detour), @ptrCast(&trampoline), @ptrCast(&target))) {
+                .ok => {},
+                .unknown => return error.Unknown,
+                .error_not_initialized => return error.NotInitialized,
+                .error_already_created => return error.AlreadyCreated,
+                .error_not_executable => return error.NotExecutable,
+                .error_unsupported_function => return error.UnsupportedFunction,
+                .error_memory_alloc => return error.OutOfMemory,
+                .error_memory_protect => return error.MemoryProtect,
+                .error_module_not_found => return error.ModuleNotFound,
+                .error_function_not_found => return error.FunctionNotFound,
+                else => unreachable,
+            }
+
+            return .{
+                .target = target,
+                .trampoline = trampoline,
+            };
         }
 
-        pub fn disable(hook: *@This()) void {
-            _ = bindings.MH_DisableHook(@ptrCast(@constCast(hook.target)));
+        pub const DestroyError = error{
+            Unknown,
+            NotInitialized,
+            NotCreated,
+        };
+
+        pub fn destroy(hook: *@This()) DestroyError!void {
+            return switch (bindings.MH_RemoveHook(@ptrCast(hook.target))) {
+                .ok => {},
+                .unknown => error.Unknown,
+                .error_not_initialized => error.NotInitialized,
+                .error_not_created => error.NotCreated,
+                else => unreachable,
+            };
+        }
+
+        pub const EnableError = error{
+            Unknown,
+            NotInitialized,
+            AlreadyEnabled,
+        };
+
+        pub fn enable(hook: *@This()) EnableError!void {
+            return switch (bindings.MH_EnableHook(@ptrCast(hook.target))) {
+                .ok => {},
+                .unknown => error.Unknown,
+                .error_not_initialized => return error.NotInitialized,
+                .error_enabled => error.AlreadyEnabled,
+                else => unreachable,
+            };
+        }
+
+        pub const DisableError = error{
+            Unknown,
+            NotInitialized,
+            AlreadyDisabled,
+        };
+
+        pub fn disable(hook: *@This()) DisableError!void {
+            return switch (bindings.MH_DisableHook(@ptrCast(hook.target))) {
+                .ok => {},
+                .unknown => error.Unknown,
+                .error_not_initialized => return error.NotInitialized,
+                .error_disabled => error.AlreadyDisabled,
+                else => unreachable,
+            };
         }
     };
+}
+
+pub fn createHook(target: anytype, detour: @TypeOf(target)) b: {
+    const H = Hook(@TypeOf(target));
+    break :b H.CreateError!H;
+} {
+    return Hook(@TypeOf(target)).create(target, detour);
+}
+
+pub fn findAndCreateHook(module_name: [:0]const u16, function_name: [:0]const u8, detour: anytype) b: {
+    const H = Hook(@TypeOf(detour));
+    break :b H.FindAndCreateError!H;
+} {
+    return Hook(@TypeOf(detour)).findAndCreateHook(module_name, function_name, detour);
 }
 
 test {
@@ -204,11 +304,48 @@ test {
         fn detouredAdd(a: i32, b: i32) callconv(.C) i32 {
             return trampoline(a, b) * 2;
         }
+
+        extern fn MessageBoxExA(
+            hWnd: ?std.os.windows.HWND,
+            lpText: std.os.windows.LPCSTR,
+            lpCaption: std.os.windows.LPCSTR,
+            uType: std.os.windows.UINT,
+            wLanguageId: std.os.windows.WORD,
+        ) callconv(.C) c_int;
+
+        fn FakeMessageBoxExA(
+            hWnd: ?std.os.windows.HWND,
+            lpText: std.os.windows.LPCSTR,
+            lpCaption: std.os.windows.LPCSTR,
+            uType: std.os.windows.UINT,
+            wLanguageId: std.os.windows.WORD,
+        ) callconv(.C) c_int {
+            _ = wLanguageId;
+            _ = uType;
+            _ = lpCaption;
+            _ = lpText;
+            _ = hWnd;
+            return 420;
+        }
     };
 
-    var hook = Hook(*const fn (i32, i32) callconv(.C) i32).create(&funcs.add, &funcs.detouredAdd);
+    var hook = try createHook(&funcs.add, &funcs.detouredAdd);
+    defer hook.destroy() catch unreachable;
+
     funcs.trampoline = hook.trampoline;
-    hook.enable();
+
+    try std.testing.expectEqual(@as(i32, 15), funcs.add(7, 8));
+    try hook.enable();
+    try std.testing.expectError(error.AlreadyEnabled, hook.enable());
 
     try std.testing.expectEqual(@as(i32, 30), funcs.add(7, 8));
+    try hook.disable();
+    try std.testing.expectEqual(@as(i32, 15), funcs.add(7, 8));
+
+    var hook2 = try findAndCreateHook(std.unicode.utf8ToUtf16LeStringLiteral("user32"), "MessageBoxExA", &funcs.FakeMessageBoxExA);
+    defer hook2.destroy() catch unreachable;
+
+    try hook2.enable();
+
+    try std.testing.expectEqual(@as(c_int, 420), funcs.MessageBoxExA(null, "hi", "hello", 0, 0));
 }
