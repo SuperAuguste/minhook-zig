@@ -108,28 +108,28 @@ pub const bindings = struct {
     ///   pTarget [in] A pointer to the target function.
     ///                If this parameter is MH_ALL_HOOKS, all created hooks are
     ///                enabled in one go.
-    pub extern fn MH_EnableHook(target: *const anyopaque) callconv(std.os.windows.WINAPI) Status;
+    pub extern fn MH_EnableHook(target: ?*const anyopaque) callconv(std.os.windows.WINAPI) Status;
 
     /// Disables an already created hook.
     /// Parameters:
     ///   pTarget [in] A pointer to the target function.
     ///                If this parameter is MH_ALL_HOOKS, all created hooks are
     ///                disabled in one go.
-    pub extern fn MH_DisableHook(target: *const anyopaque) callconv(std.os.windows.WINAPI) Status;
+    pub extern fn MH_DisableHook(target: ?*const anyopaque) callconv(std.os.windows.WINAPI) Status;
 
     /// Queues to enable an already created hook.
     /// Parameters:
     ///   pTarget [in] A pointer to the target function.
     ///                If this parameter is MH_ALL_HOOKS, all created hooks are
     ///                queued to be enabled.
-    pub extern fn MH_QueueEnableHook(target: *const anyopaque) callconv(std.os.windows.WINAPI) Status;
+    pub extern fn MH_QueueEnableHook(target: ?*const anyopaque) callconv(std.os.windows.WINAPI) Status;
 
     /// Queues to disable an already created hook.
     /// Parameters:
     ///   pTarget [in] A pointer to the target function.
     ///                If this parameter is MH_ALL_HOOKS, all created hooks are
     ///                queued to be disabled.
-    pub extern fn MH_QueueDisableHook(target: *const anyopaque) callconv(std.os.windows.WINAPI) Status;
+    pub extern fn MH_QueueDisableHook(target: ?*const anyopaque) callconv(std.os.windows.WINAPI) Status;
 
     /// Applies all queued changes in one go.
     pub extern fn MH_ApplyQueued() callconv(std.os.windows.WINAPI) Status;
@@ -163,20 +163,48 @@ pub fn deinit() DeinitError!void {
     };
 }
 
+pub const CreateError = error{
+    Unknown,
+    NotInitialized,
+    AlreadyCreated,
+    NotExecutable,
+    UnsupportedFunction,
+    OutOfMemory,
+    MemoryProtect,
+};
+
+pub const FindAndCreateError = CreateError || error{ ModuleNotFound, FunctionNotFound };
+
+pub const DestroyError = error{
+    Unknown,
+    NotInitialized,
+    NotCreated,
+};
+
+pub const EnableError = error{
+    Unknown,
+    NotInitialized,
+    NotCreated,
+    AlreadyEnabled,
+};
+
+pub const QueueEnableDisableError = error{
+    Unknown,
+    NotInitialized,
+    NotCreated,
+};
+
+pub const DisableError = error{
+    Unknown,
+    NotInitialized,
+    NotCreated,
+    AlreadyDisabled,
+};
+
 pub fn Hook(comptime FuncType: type) type {
     return struct {
         target: FuncType,
         trampoline: FuncType,
-
-        pub const CreateError = error{
-            Unknown,
-            NotInitialized,
-            AlreadyCreated,
-            NotExecutable,
-            UnsupportedFunction,
-            OutOfMemory,
-            MemoryProtect,
-        };
 
         /// Do not invoke the target function after hooking
         /// Returns the trampoline, which should be called instead
@@ -199,8 +227,6 @@ pub fn Hook(comptime FuncType: type) type {
                 .trampoline = trampoline,
             };
         }
-
-        pub const FindAndCreateError = CreateError || error{ ModuleNotFound, FunctionNotFound };
 
         pub fn findAndCreateHook(module_name: [:0]const u16, function_name: [:0]const u8, detour: FuncType) FindAndCreateError!@This() {
             var target: FuncType = undefined;
@@ -226,12 +252,6 @@ pub fn Hook(comptime FuncType: type) type {
             };
         }
 
-        pub const DestroyError = error{
-            Unknown,
-            NotInitialized,
-            NotCreated,
-        };
-
         pub fn destroy(hook: *@This()) DestroyError!void {
             return switch (bindings.MH_RemoveHook(@ptrCast(hook.target))) {
                 .ok => {},
@@ -242,52 +262,110 @@ pub fn Hook(comptime FuncType: type) type {
             };
         }
 
-        pub const EnableError = error{
-            Unknown,
-            NotInitialized,
-            AlreadyEnabled,
-        };
-
         pub fn enable(hook: *@This()) EnableError!void {
             return switch (bindings.MH_EnableHook(@ptrCast(hook.target))) {
                 .ok => {},
                 .unknown => error.Unknown,
-                .error_not_initialized => return error.NotInitialized,
+                .error_not_initialized => error.NotInitialized,
+                .error_not_created => error.NotCreated,
                 .error_enabled => error.AlreadyEnabled,
                 else => unreachable,
             };
         }
 
-        pub const DisableError = error{
-            Unknown,
-            NotInitialized,
-            AlreadyDisabled,
-        };
+        pub fn queueEnable(hook: *@This()) QueueEnableDisableError!void {
+            return switch (bindings.MH_QueueEnableHook(@ptrCast(hook.target))) {
+                .ok => {},
+                .unknown => error.Unknown,
+                .error_not_initialized => error.NotInitialized,
+                .error_not_created => error.NotCreated,
+                else => unreachable,
+            };
+        }
 
         pub fn disable(hook: *@This()) DisableError!void {
             return switch (bindings.MH_DisableHook(@ptrCast(hook.target))) {
                 .ok => {},
                 .unknown => error.Unknown,
-                .error_not_initialized => return error.NotInitialized,
+                .error_not_initialized => error.NotInitialized,
+                .error_not_created => error.NotCreated,
                 .error_disabled => error.AlreadyDisabled,
+                else => unreachable,
+            };
+        }
+
+        pub fn queueDisable(hook: *@This()) QueueEnableDisableError!void {
+            return switch (bindings.MH_QueueDisableHook(@ptrCast(hook.target))) {
+                .ok => {},
+                .unknown => error.Unknown,
+                .error_not_initialized => error.NotInitialized,
+                .error_not_created => error.NotCreated,
                 else => unreachable,
             };
         }
     };
 }
 
-pub fn createHook(target: anytype, detour: @TypeOf(target)) b: {
-    const H = Hook(@TypeOf(target));
-    break :b H.CreateError!H;
-} {
+pub fn createHook(target: anytype, detour: @TypeOf(target)) CreateError!Hook(@TypeOf(target)) {
     return Hook(@TypeOf(target)).create(target, detour);
 }
 
-pub fn findAndCreateHook(module_name: [:0]const u16, function_name: [:0]const u8, detour: anytype) b: {
-    const H = Hook(@TypeOf(detour));
-    break :b H.FindAndCreateError!H;
-} {
+pub fn findAndCreateHook(module_name: [:0]const u16, function_name: [:0]const u8, detour: anytype) FindAndCreateError!Hook(@TypeOf(detour)) {
     return Hook(@TypeOf(detour)).findAndCreateHook(module_name, function_name, detour);
+}
+
+pub fn enableAll() QueueEnableDisableError!void {
+    return switch (bindings.MH_EnableHook(null)) {
+        .ok => {},
+        .unknown => error.Unknown,
+        .error_not_initialized => error.NotInitialized,
+        .error_enabled => error.AlreadyEnabled,
+        else => unreachable,
+    };
+}
+
+pub fn disableAll() QueueEnableDisableError!void {
+    return switch (bindings.MH_DisableHook(null)) {
+        .ok => {},
+        .unknown => error.Unknown,
+        .error_not_initialized => error.NotInitialized,
+        .error_disabled => error.AlreadyDisabled,
+        else => unreachable,
+    };
+}
+
+pub fn queueEnableAll() QueueEnableDisableError!void {
+    return switch (bindings.MH_QueueEnableHook(null)) {
+        .ok => {},
+        .unknown => error.Unknown,
+        .error_not_initialized => error.NotInitialized,
+        .error_not_created => error.NotCreated,
+        else => unreachable,
+    };
+}
+
+pub fn queueDisableAll() QueueEnableDisableError!void {
+    return switch (bindings.MH_QueueDisableHook(null)) {
+        .ok => {},
+        .unknown => error.Unknown,
+        .error_not_initialized => error.NotInitialized,
+        .error_not_created => error.NotCreated,
+        else => unreachable,
+    };
+}
+
+pub const ApplyQueuedError = error{
+    Unknown,
+    NotInitialized,
+};
+
+pub fn applyQueued() ApplyQueuedError!void {
+    return switch (bindings.MH_ApplyQueued()) {
+        .ok => {},
+        .unknown => error.Unknown,
+        .error_not_initialized => error.NotInitialized,
+        else => unreachable,
+    };
 }
 
 test {
@@ -348,4 +426,33 @@ test {
     try hook2.enable();
 
     try std.testing.expectEqual(@as(c_int, 420), funcs.MessageBoxExA(null, "hi", "hello", 0, 0));
+}
+
+test "queued" {
+    const funcs = struct {
+        var trampoline: *const fn (i32, i32) callconv(.C) i32 = undefined;
+
+        fn add(a: i32, b: i32) callconv(.C) i32 {
+            return a + b;
+        }
+
+        fn detouredAdd(a: i32, b: i32) callconv(.C) i32 {
+            return trampoline(a, b) * 2;
+        }
+    };
+
+    try init();
+    var hook = try createHook(&funcs.add, &funcs.detouredAdd);
+    funcs.trampoline = hook.trampoline;
+
+    try hook.queueEnable();
+
+    try applyQueued();
+
+    try std.testing.expectEqual(@as(i32, 30), funcs.add(7, 8));
+
+    try queueDisableAll();
+    try applyQueued();
+
+    try std.testing.expectEqual(@as(i32, 15), funcs.add(7, 8));
 }
